@@ -2,6 +2,7 @@
 
 import os
 import logging
+import requests
 from django.http import HttpResponseRedirect
 from django.utils.translation import ugettext as _
 
@@ -39,6 +40,46 @@ if ENABLE_OAUTH:
     }
     ATTRIBUTE_MAP.update(getattr(settings, 'OAUTH_ATTRIBUTE_MAP', {}))
 
+def format_user_info(user_info_resp, attribute_map, provider_domain):
+    logger.info('user info resp: %s' % user_info_resp.text)
+    error = False
+    user_info = {}
+    user_info_json = user_info_resp.json()
+
+    for item, attr in attribute_map.items():
+        required, user_attr = attr
+        value = user_info_json.get(item, '')
+
+        if value:
+            # ccnet email
+            if user_attr == 'email':
+                user_info[user_attr] = value if is_valid_email(str(value)) else \
+                        '%s@%s' % (str(value), provider_domain)
+            else:
+                user_info[user_attr] = value
+        elif required:
+            error = True
+
+    return user_info, error
+
+def update_user_profile(user_info):
+    # update user's profile
+    email = user_info['email']
+    name = user_info['name'] if user_info.has_key('name') else ''
+    contact_email = user_info['contact_email'] if \
+            user_info.has_key('contact_email') else ''
+
+    profile = Profile.objects.get_profile_by_user(email)
+    if not profile:
+        profile = Profile(user=email)
+
+    if name:
+        profile.nickname = name.strip()
+        profile.save()
+
+    if contact_email:
+        profile.contact_email = contact_email.strip()
+        profile.save()
 
 def oauth_check(func):
     """ Decorator for check if OAuth valid.
@@ -135,29 +176,8 @@ def oauth_callback(request):
         logger.error(e)
         return render_error(request, _('Error, please contact administrator.'))
 
-    def format_user_info(user_info_resp):
-        logger.info('user info resp: %s' % user_info_resp.text)
-        error = False
-        user_info = {}
-        user_info_json = user_info_resp.json()
-
-        for item, attr in ATTRIBUTE_MAP.items():
-            required, user_attr = attr
-            value = user_info_json.get(item, '')
-
-            if value:
-                # ccnet email
-                if user_attr == 'email':
-                    user_info[user_attr] = value if is_valid_email(str(value)) else \
-                            '%s@%s' % (str(value), PROVIDER_DOMAIN)
-                else:
-                    user_info[user_attr] = value
-            elif required:
-                error = True
-
-        return user_info, error
-
-    user_info, error = format_user_info(user_info_resp)
+    user_info, error = format_user_info(user_info_resp, ATTRIBUTE_MAP,
+            PROVIDER_DOMAIN)
     if error:
         logger.error('Required user info not found.')
         logger.error(user_info)
@@ -181,27 +201,128 @@ def oauth_callback(request):
     request.user = user
     auth.login(request, user)
 
-    # update user's profile
-    name = user_info['name'] if user_info.has_key('name') else ''
-    contact_email = user_info['contact_email'] if \
-            user_info.has_key('contact_email') else ''
-
-    profile = Profile.objects.get_profile_by_user(email)
-    if not profile:
-        profile = Profile(user=email)
-
-    if name:
-        profile.nickname = name.strip()
-        profile.save()
-
-    if contact_email:
-        profile.contact_email = contact_email.strip()
-        profile.save()
+    update_user_profile(user_info)
 
     # generate auth token for Seafile client
     api_token = get_api_token(request)
 
     # redirect user to home page
     response = HttpResponseRedirect(request.session['oauth_redirect'])
+    response.set_cookie('seahub_auth', email + '@' + api_token.key)
+    return response
+
+
+##### work weixin oauth
+ENABLE_WORK_WEIXIN_OAUTH = getattr(settings, 'ENABLE_WORK_WEIXIN_OAUTH', False)
+if ENABLE_WORK_WEIXIN_OAUTH:
+
+    # Used for work weixin oauth workflow.
+    WORK_WEIXIN_APP_ID = getattr(settings, 'OAUTH_WORK_WEIXIN_APP_ID', '')
+    WORK_WEIXIN_AGENT_ID = getattr(settings, 'OAUTH_WORK_WEIXIN_AGENT_ID', '')
+    WORK_WEIXIN_AGENT_SECRET = getattr(settings, 'OAUTH_WORK_WEIXIN_AGENT_SECRET', '')
+
+    WORK_WEIXIN_AUTHORIZATION_URL = getattr(settings, 'OAUTH_WORK_WEIXIN_AUTHORIZATION_URL', '')
+    WORK_WEIXIN_REDIRECT_URL = getattr(settings, 'OAUTH_WORK_WEIXIN_REDIRECT_URL', '')
+    WORK_WEIXIN_TOKEN_URL = getattr(settings, 'OAUTH_WORK_WEIXIN_TOKEN_URL', '')
+    WORK_WEIXIN_USER_INFO_URL = getattr(settings, 'OAUTH_WORK_WEIXIN_USER_INFO_URL', '')
+
+    # Used for init an user for Seahub.
+    WORK_WEIXIN_PROVIDER_DOMAIN = getattr(settings, 'OAUTH_WORK_WEIXIN_PROVIDER_DOMAIN', 'work.weixin.com')
+    WORK_WEIXIN_ATTRIBUTE_MAP = getattr(settings, 'OAUTH_WORK_WEIXIN_ATTRIBUTE_MAP',
+            {
+                "UserId": (True, "email"),
+                "name": (False, "name"),
+                "email": (False, "contact_email"),
+            })
+
+def work_weixin_oauth_check(func):
+    """ Decorator for check if OAuth valid.
+    """
+
+    def _decorated(request):
+
+        error = False
+        if not ENABLE_WORK_WEIXIN_OAUTH:
+            logger.error('OAuth not enabled.')
+            error = True
+        else:
+            if not WORK_WEIXIN_AUTHORIZATION_URL \
+                    or not WORK_WEIXIN_REDIRECT_URL \
+                    or not WORK_WEIXIN_TOKEN_URL \
+                    or not WORK_WEIXIN_USER_INFO_URL:
+                logger.error('OAuth relevant settings invalid.')
+                logger.error('WORK_WEIXIN_AUTHORIZATION_URL: %s' % WORK_WEIXIN_AUTHORIZATION_URL)
+                logger.error('WORK_WEIXIN_REDIRECT_URL: %s' % WORK_WEIXIN_REDIRECT_URL)
+                logger.error('WORK_WEIXIN_TOKEN_URL: %s' % WORK_WEIXIN_TOKEN_URL)
+                logger.error('WORK_WEIXIN_USER_INFO_URL: %s' % WORK_WEIXIN_USER_INFO_URL)
+                error = True
+
+        if error:
+            return render_error(request,
+                                _('Error, please contact administrator.'))
+
+        return func(request)
+
+    return _decorated
+
+
+@work_weixin_oauth_check
+def oauth_work_weixin_login(request):
+    params = '?appid=%s&agentid=%s&redirect_uri=%s' % (
+            WORK_WEIXIN_APP_ID, WORK_WEIXIN_AGENT_ID, WORK_WEIXIN_REDIRECT_URL)
+    authorization_url = WORK_WEIXIN_AUTHORIZATION_URL + params
+    return HttpResponseRedirect(authorization_url)
+
+
+@work_weixin_oauth_check
+def oauth_work_weixin_callback(request):
+
+    try:
+        token_params = '?corpid=%s&corpsecret=%s' % (
+                WORK_WEIXIN_APP_ID, WORK_WEIXIN_AGENT_SECRET)
+        access_token_resp = requests.get(WORK_WEIXIN_TOKEN_URL + token_params)
+        access_token_json = access_token_resp.json()
+
+        code = request.GET.get('code')
+        access_token = access_token_json['access_token']
+        user_info_params = '?access_token=%s&code=%s' % (access_token, code)
+        user_info_url = WORK_WEIXIN_USER_INFO_URL + user_info_params
+        user_info_resp = requests.get(user_info_url)
+    except Exception as e:
+        logger.error(e)
+        return render_error(request, _('Error, please contact administrator.'))
+
+    user_info, error = format_user_info(user_info_resp,
+            WORK_WEIXIN_ATTRIBUTE_MAP, WORK_WEIXIN_PROVIDER_DOMAIN)
+    if error:
+        logger.error('Required user info not found.')
+        logger.error(user_info)
+        return render_error(request, _('Error, please contact administrator.'))
+
+    # seahub authenticate user
+    email = user_info['email']
+
+    try:
+        user = auth.authenticate(remote_user=email)
+    except User.DoesNotExist:
+        user = None
+
+    if not user or not user.is_active:
+        logger.error('User %s not found or inactive.' % email)
+        # a page for authenticate user failed
+        return render_error(request, _(u'User %s not found.') % email)
+
+    # User is valid.  Set request.user and persist user in the session
+    # by logging the user in.
+    request.user = user
+    auth.login(request, user)
+
+    update_user_profile(user_info)
+
+    # generate auth token for Seafile client
+    api_token = get_api_token(request)
+
+    # redirect user to home page
+    response = HttpResponseRedirect(request.GET.get(auth.REDIRECT_FIELD_NAME, '/'))
     response.set_cookie('seahub_auth', email + '@' + api_token.key)
     return response
