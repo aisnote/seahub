@@ -22,7 +22,7 @@ class WorkWeixinDepartmentMembersList extends Component {
       } else {
         avatar = siteRoot + 'media/avatars/default.png';
       }
-      const checkbox = member.exists ? '' :
+      const checkbox = member.email ? '' :
         <input
           type="checkbox"
           className="vam"
@@ -35,8 +35,8 @@ class WorkWeixinDepartmentMembersList extends Component {
           <td><img className="avatar" src={avatar}></img></td>
           <td>{member.name}</td>
           <td>{member.mobile}</td>
-          <td>{member.email}</td>
-          <td>{member.exists ? <i className="sf2-icon-tick"></i> : ''}</td>
+          <td>{member.contact_email}</td>
+          <td>{member.email ? <i className="sf2-icon-tick"></i> : ''}</td>
         </tr>
       );
     });
@@ -291,7 +291,7 @@ class WorkWeixinDepartments extends Component {
     this.setState({
       isMembersListLoading: true,
     });
-    seafileAPI.adminListWorkWeixinDepartmentMembers(department_id.toString(), {fetch_child: 1}).then((res) => {
+    seafileAPI.adminListWorkWeixinDepartmentMembers(department_id.toString(), {fetch_child: true}).then((res) => {
       let membersTempObj = this.state.membersTempObj;
       membersTempObj[department_id] = res.data.userlist;
       let canCheckUserIds = this.getCanCheckUserIds(res.data.userlist);
@@ -315,7 +315,7 @@ class WorkWeixinDepartments extends Component {
     let canCheckUserIds = [];
     for (let i = 0; i < membersList.length; i++) {
       let user = membersList[i];
-      if (!user.exists) {
+      if (!user.email) {
         canCheckUserIds.push(user.userid);
       }
     }
@@ -395,7 +395,7 @@ class WorkWeixinDepartments extends Component {
     if (!userList.length) {
       toaster.danger('未选择成员', {duration: 3});
     } else {
-      seafileAPI.adminAddWorkWeixinUsers(userList).then((res) => {
+      seafileAPI.adminAddWorkWeixinUsersBatch(userList).then((res) => {
         this.setState({
           newUsersTempObj: {},
           isCheckedAll: false,
@@ -407,6 +407,7 @@ class WorkWeixinDepartments extends Component {
           for (let i = 0; i < res.data.success.length; i++) {
             let userid = res.data.success[i].userid;
             let name = res.data.success[i].name;
+            let email = res.data.success[i].email;
             toaster.success(name + ' 成功导入', {duration: 1});
             // refresh all temp
             if (canCheckUserIds.indexOf(userid) !== -1) {
@@ -414,14 +415,14 @@ class WorkWeixinDepartments extends Component {
             }
             for (let j = 0; j < membersList.length; j++) {
               if (membersList[j].userid === userid) {
-                membersList[j].exists = true;
+                membersList[j].email = email;
                 break;
               }
             }
             for (let departmentId in membersTempObj) {
               for (let k = 0; k < membersTempObj[departmentId].length; k++) {
                 if (membersTempObj[departmentId][k].userid === userid) {
-                  membersTempObj[departmentId][k].exists = true;
+                  membersTempObj[departmentId][k].email = email;
                   break;
                 }
               }
